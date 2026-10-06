@@ -1,19 +1,12 @@
 #!/usr/bin/env bash
 
-set -euo pipefail
+set -e
+set -u
+set -o pipefail
 
-# Usage:
-#   ./cleanup.sh <log_dir> <threshold_percent> <backup_dir>
-#
-# Example:
-#   ./cleanup.sh ./log 70 ./backup
-#
-# Compression:
-#   default                     -> tar.gz
-#   LAB1_MAX_COMPRESSION=1     -> tar.lzma
 
 usage() {
-    echo "Usage: $0 <log_dir> <threshold_percent> <backup_dir>"
+    echo "Incorrect usage; Gotta be: $0 <log_dir> <threshold_percent> <backup_dir>"
     exit 1
 }
 
@@ -22,11 +15,8 @@ error() {
     exit 1
 }
 
-# ------------------------------------------------------------
-# Arguments
-# ------------------------------------------------------------
 
-[[ $# -eq 3 ]] || usage
+(( $# == 3 )) || usage
 
 LOG_DIR="$1"
 THRESHOLD="$2"
@@ -34,11 +24,9 @@ BACKUP_DIR="$3"
 
 [[ -d "$LOG_DIR" ]] || error "log directory does not exist: $LOG_DIR"
 
-[[ "$THRESHOLD" =~ ^[0-9]+$ ]] ||
-    error "threshold must be an integer from 0 to 100"
+(( THRESHOLD == THRESHOLD + 0 )) 2>/dev/null || error "threshold must be an integer from 0 to 100"
 
-(( THRESHOLD >= 0 && THRESHOLD <= 100 )) ||
-    error "threshold must be between 0 and 100"
+(( THRESHOLD >= 0 && THRESHOLD <= 100 )) || error "threshold must be between 0 and 100"
 
 mkdir -p "$BACKUP_DIR"
 
@@ -60,24 +48,19 @@ fi
 # Read filesystem usage
 # ------------------------------------------------------------
 
-read -r TOTAL_KB USED_KB AVAILABLE_KB < <(
-    df -Pk "$LOG_DIR" | awk 'NR == 2 {
-        print $2, $3, $4
-    }'
-)
+{ read -r _; read -r _ TOTAL_KB _; } < <(df -P -k "$LOG_DIR")
 
-[[ -n "$TOTAL_KB" ]] ||
-    error "failed to determine filesystem size"
+read -r DIR_USED_KB _ < <(du -s -k "$LOG_DIR")
 
-# Use tenths of a percent to avoid floating-point arithmetic.
-USED_PERCENT_10=$(( USED_KB * 1000 / TOTAL_KB ))
+[[ -n "$TOTAL_KB" ]] || error "failed to get directory size"
 
-USED_PERCENT_INT=$(( USED_PERCENT_10 / 10 ))
-USED_PERCENT_DEC=$(( USED_PERCENT_10 % 10 ))
+USED_PERCENT=$(( USED_KB * 10000 / TOTAL_KB ))
+
+USED_PERCENT_INT=$(( USED_PERCENT / 100 ))
+USED_PERCENT_FRAC=$(( USED_PERCENT % 100 ))
 
 echo "Directory : $LOG_DIR"
-echo "Backup    : $BACKUP_DIR"
-echo "Usage     : ${USED_PERCENT_INT}.${USED_PERCENT_DEC}%"
+echo "Usage     : ${USED_PERCENT_INT}.${USED_PERCENT_FRAC}%"
 echo "Threshold : ${THRESHOLD}%"
 echo "Mode      : $COMPRESSION"
 
@@ -85,8 +68,8 @@ echo "Mode      : $COMPRESSION"
 # Check threshold
 # ------------------------------------------------------------
 
-if (( USED_PERCENT_10 <= THRESHOLD * 10 )); then
-    echo "Nothing to archive."
+if (( USED_PERCENT <= THRESHOLD * 100 )); then
+    echo "${USED_PERCENT_INT}.${USED_PERCENT_FRAC}% <= ${THRESHOLD}%; hence nothing to archive."
     exit 0
 fi
 
@@ -102,11 +85,11 @@ NEEDED_FREE_KB=$(( USED_KB - TARGET_USED_KB ))
 
 TMP_DIR=$(mktemp -d)
 
-cleanup() {
+remove_temp_dir() {
     rm -rf "$TMP_DIR"
 }
 
-trap cleanup EXIT
+trap remove_temp_dir EXIT
 
 FILE_LIST="$TMP_DIR/files"
 SELECTED_LIST="$TMP_DIR/selected"
@@ -122,10 +105,7 @@ touch "$SELECTED_LIST"
 # NUL separators allow filenames containing spaces to work.
 # ------------------------------------------------------------
 
-find "$LOG_DIR" \
-    -type f \
-    -printf '%T@ %p\0' |
-    sort -z -n > "$FILE_LIST"
+find "$LOG_DIR" -type f -printf '%T@ %p\0' | sort -z -n > "$FILE_LIST"
 
 # ------------------------------------------------------------
 # Select the oldest files until enough data is collected
